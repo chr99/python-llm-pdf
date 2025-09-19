@@ -1,0 +1,128 @@
+import os
+import requests
+from textwrap import wrap
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+
+# ==========================
+# Função para salvar em PDF
+# ==========================
+def salvar_pdf(texto, caminho="historia.pdf", titulo="História", autor="IA"):
+    c = canvas.Canvas(caminho, pagesize=A4)
+    c.setTitle(titulo)
+    c.setAuthor(autor)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(A4[0]/2, A4[1]-100, titulo)
+    c.setFont("Helvetica", 12)
+
+    margin_x = 50
+    y = A4[1] - 140
+    for paragraph in texto.split("\n"):
+        lines = wrap(paragraph, 95)
+        for line in lines:
+            if y < 50:
+                c.showPage()
+                y = A4[1] - 50
+                c.setFont("Helvetica", 12)
+            c.drawString(margin_x, y, line)
+            y -= 16
+    c.save()
+
+# ===================================
+# Funções para cada provider de LLM
+# ===================================
+def call_openai(api_key, prompt, model="gpt-4o-mini"):
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4000,
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    return resp.json()["choices"][0]["message"]["content"]
+
+def call_groq(api_key, prompt, model="mixtral-8x7b-32768"):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4000,
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    return resp.json()["choices"][0]["message"]["content"]
+
+def call_deepseek(api_key, prompt, model="deepseek-chat"):
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4000,
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    return resp.json()["choices"][0]["message"]["content"]
+
+def call_gemini(api_key, prompt, model="gemini-pro"):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+def call_anthropic(api_key, prompt, model="claude-3-sonnet-20240229"):
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {"x-api-key": api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+    payload = {
+        "model": model,
+        "max_tokens": 4000,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    return resp.json()["content"][0]["text"]
+
+# =======================
+# Normalização do nome
+# =======================
+def normalizar_provider(nome):
+    nome = nome.strip().lower().replace("-", "").replace("_", "")
+    if "openai" in nome: return "openai"
+    if "groq" in nome: return "groq"
+    if "deepseek" in nome: return "deepseek"
+    if "gemini" in nome or "google" in nome: return "gemini"
+    if "anthropic" in nome or "claude" in nome: return "anthropic"
+    raise ValueError("Provider não suportado.")
+
+# =======================
+# Escolha do provider
+# =======================
+def escolher_provider(provider, api_key, prompt):
+    provider = normalizar_provider(provider)
+    if provider == "openai":
+        return call_openai(api_key, prompt)
+    elif provider == "groq":
+        return call_groq(api_key, prompt)
+    elif provider == "deepseek":
+        return call_deepseek(api_key, prompt)
+    elif provider == "gemini":
+        return call_gemini(api_key, prompt)
+    elif provider == "anthropic":
+        return call_anthropic(api_key, prompt)
+
+# =======================
+# Programa principal
+# =======================
+if __name__ == "__main__":
+    print("=== Agente Gerador de Livros em PDF ===")
+    provider = input("Escolha o provider (OpenAI/Groq/DeepSeek/Gemini/Anthropic): ")
+    api_key = input("Digite sua API Key: ").strip()
+    prompt = input("Escreva o prompt para gerar a história: ")
+
+    print("\nGerando história longa... isso pode levar alguns minutos.\n")
+    texto = escolher_provider(provider, api_key, prompt)
+
+    salvar_pdf(texto, caminho="livro.pdf", titulo="História Gerada", autor="IA")
+    print("✅ Livro salvo como 'livro.pdf'")
