@@ -1,128 +1,195 @@
 import os
-import requests
+import time
+import json
+from pathlib import Path
 from textwrap import wrap
+import requests
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 
-# ==========================
-# Função para salvar em PDF
-# ==========================
-def salvar_pdf(texto, caminho="historia.pdf", titulo="História", autor="IA"):
-    c = canvas.Canvas(caminho, pagesize=A4)
-    c.setTitle(titulo)
-    c.setAuthor(autor)
-    c.setFont("Helvetica-Bold", 18)
-    c.drawCentredString(A4[0]/2, A4[1]-100, titulo)
-    c.setFont("Helvetica", 12)
+# ---------- Configurações ----------
+OUTPUT_DIR = Path("./romance_output")
+CHAPTERS_DIR = OUTPUT_DIR / "chapters"
+STATE_FILE = OUTPUT_DIR / "state.json"
+OUTPUT_DIR.mkdir(exist_ok=True)
+CHAPTERS_DIR.mkdir(exist_ok=True)
+MAX_RETRIES = 5
+RETRY_BACKOFF = 3
+WORDS_PER_PAGE = 300
+MAX_CHAPTERS_CAP = 200
 
-    margin_x = 50
-    y = A4[1] - 140
-    for paragraph in texto.split("\n"):
-        lines = wrap(paragraph, 95)
-        for line in lines:
-            if y < 50:
-                c.showPage()
-                y = A4[1] - 50
-                c.setFont("Helvetica", 12)
-            c.drawString(margin_x, y, line)
-            y -= 16
+# ---------- PDF ----------
+def salvar_pdf(chapters, pdf_path, title="História", author="IA"):
+    c = canvas.Canvas(str(pdf_path), pagesize=A4)
+    width, height = A4
+    # capa
+    c.setFont("Helvetica-Bold", 28)
+    c.drawCentredString(width/2, height-120, title)
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(width/2, height-150, f"Por {author}")
+    c.showPage()
+    # conteúdo
+    c.setFont("Helvetica", 12)
+    margin_x = 40
+    leading = 16
+    y = height - 50
+    page_num = 1
+    for i, ch in enumerate(chapters, start=1):
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margin_x, y, f"Capítulo {i}")
+        y -= leading*1.2
+        c.setFont("Helvetica", 12)
+        for paragraph in ch.split("\n\n"):
+            lines = wrap(paragraph.replace("\r",""), 92)
+            for line in lines:
+                if y < 60:
+                    c.setFont("Helvetica", 9)
+                    c.drawCentredString(width/2, 20, str(page_num))
+                    c.showPage()
+                    page_num +=1
+                    c.setFont("Helvetica", 12)
+                    y = height - 50
+                c.drawString(margin_x, y, line)
+                y -= leading
+            y -= leading
+    c.setFont("Helvetica", 9)
+    c.drawCentredString(width/2, 20, str(page_num))
     c.save()
 
-# ===================================
-# Funções para cada provider de LLM
-# ===================================
+# ---------- Adapters ----------
 def call_openai(api_key, prompt, model="gpt-4o-mini"):
     url = "https://api.openai.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-    }
+    payload = {"model": model, "messages":[{"role":"user","content":prompt}], "max_tokens":4000}
     resp = requests.post(url, headers=headers, json=payload)
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    return data.get("choices",[{}])[0].get("message",{}).get("content","")
 
 def call_groq(api_key, prompt, model="mixtral-8x7b-32768"):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-    }
+    payload = {"model": model, "messages":[{"role":"user","content":prompt}], "max_tokens":4000}
     resp = requests.post(url, headers=headers, json=payload)
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    return data.get("choices",[{}])[0].get("message",{}).get("content","")
 
 def call_deepseek(api_key, prompt, model="deepseek-chat"):
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-    }
+    payload = {"model": model,"messages":[{"role":"user","content":prompt}],"max_tokens":4000}
     resp = requests.post(url, headers=headers, json=payload)
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    if "choices" in data and len(data["choices"])>0:
+        return data["choices"][0].get("message",{}).get("content","")
+    return data.get("output_text") or data.get("text") or str(data)
 
 def call_gemini(api_key, prompt, model="gemini-pro"):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    payload = {"contents":[{"parts":[{"text":prompt}]}]}
     resp = requests.post(url, headers=headers, json=payload)
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    data = resp.json()
+    if "candidates" in data and len(data["candidates"])>0:
+        return data["candidates"][0].get("content",[{}])[0].get("text","")
+    return str(data)
 
-def call_anthropic(api_key, prompt, model="claude-3-sonnet-20240229"):
+def call_anthropic(api_key, prompt, model="claude-3"):
     url = "https://api.anthropic.com/v1/messages"
-    headers = {"x-api-key": api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01"}
-    payload = {
-        "model": model,
-        "max_tokens": 4000,
-        "messages": [{"role": "user", "content": prompt}]
-    }
+    headers = {"x-api-key": api_key, "Content-Type": "application/json","anthropic-version":"2023-06-01"}
+    payload = {"model":model,"max_tokens":4000,"messages":[{"role":"user","content":prompt}]}
     resp = requests.post(url, headers=headers, json=payload)
-    return resp.json()["content"][0]["text"]
+    data = resp.json()
+    if "content" in data and len(data["content"])>0:
+        return data["content"][0].get("text","")
+    return str(data)
 
-# =======================
-# Normalização do nome
-# =======================
+def call_hf(api_key, prompt, model="gpt2", max_tokens=1024):
+    url = f"https://api-inference.huggingface.co/models/{model}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {"inputs": prompt,"parameters":{"max_new_tokens": max_tokens}}
+    resp = requests.post(url, headers=headers, json=payload)
+    data = resp.json()
+    if isinstance(data,list) and len(data)>0 and "generated_text" in data[0]:
+        return data[0]["generated_text"]
+    if isinstance(data,dict) and "generated_text" in data:
+        return data["generated_text"]
+    return str(data)
+
+def call_local_llama(endpoint_url, prompt):
+    payload = {"prompt":prompt,"max_tokens":1024}
+    resp = requests.post(endpoint_url, json=payload)
+    try:
+        return resp.json().get("text","")
+    except:
+        return resp.text
+
+def call_mock(_, prompt):
+    return f"Texto de teste: {prompt}\n\n---RESUMO---\nResumo de teste."
+
+# ---------- Normalização ----------
 def normalizar_provider(nome):
-    nome = nome.strip().lower().replace("-", "").replace("_", "")
+    nome = nome.strip().lower().replace("-", "").replace("_","")
     if "openai" in nome: return "openai"
     if "groq" in nome: return "groq"
     if "deepseek" in nome: return "deepseek"
     if "gemini" in nome or "google" in nome: return "gemini"
     if "anthropic" in nome or "claude" in nome: return "anthropic"
-    raise ValueError("Provider não suportado.")
+    if "hf" in nome or "huggingface" in nome: return "hf"
+    if "local" in nome or "llama" in nome: return "local_llama"
+    if "mock" in nome: return "mock"
+    raise ValueError(f"Provider não suportado: {nome}")
 
-# =======================
-# Escolha do provider
-# =======================
-def escolher_provider(provider, api_key, prompt):
+# ---------- Router ----------
+def call_provider(provider, creds, prompt):
     provider = normalizar_provider(provider)
-    if provider == "openai":
-        return call_openai(api_key, prompt)
-    elif provider == "groq":
-        return call_groq(api_key, prompt)
-    elif provider == "deepseek":
-        return call_deepseek(api_key, prompt)
-    elif provider == "gemini":
-        return call_gemini(api_key, prompt)
-    elif provider == "anthropic":
-        return call_anthropic(api_key, prompt)
+    if provider=="openai": return call_openai(creds["api_key"], prompt)
+    if provider=="groq": return call_groq(creds["api_key"], prompt)
+    if provider=="deepseek": return call_deepseek(creds["api_key"], prompt)
+    if provider=="gemini": return call_gemini(creds["api_key"], prompt)
+    if provider=="anthropic": return call_anthropic(creds["api_key"], prompt)
+    if provider=="hf": return call_hf(creds["api_key"], prompt)
+    if provider=="local_llama": return call_local_llama(creds["endpoint"], prompt)
+    if provider=="mock": return call_mock(None, prompt)
 
-# =======================
-# Programa principal
-# =======================
-if __name__ == "__main__":
-    print("=== Agente Gerador de Livros em PDF ===")
-    provider = input("Escolha o provider (OpenAI/Groq/DeepSeek/Gemini/Anthropic): ")
-    api_key = input("Digite sua API Key: ").strip()
-    prompt = input("Escreva o prompt para gerar a história: ")
+# ---------- Utilitários ----------
+def extract_content_and_summary(raw):
+    if "\n---RESUMO---" in raw:
+        content, rest = raw.split("\n---RESUMO---",1)
+        summary = rest.strip().splitlines()[0].strip() if rest.strip() else "Resumo não fornecido"
+        return content.strip(), summary
+    lines = [ln for ln in raw.strip().splitlines() if ln.strip()]
+    if len(lines)>=2 and len(lines[-1].split())<40:
+        return "\n".join(lines[:-1]).strip(), lines[-1].strip()
+    return raw.strip(), "Resumo não gerado"
 
-    print("\nGerando história longa... isso pode levar alguns minutos.\n")
-    texto = escolher_provider(provider, api_key, prompt)
+# ---------- Loop principal ----------
+def generate_book(provider, creds, prompt, title="Livro", author="IA", pages_target=150, words_per_chapter=2000):
+    chapters = []
+    prev_summaries=[]
+    total_words=0
+    current_pages=0
+    chapter_index=1
+    while current_pages < pages_target:
+        print(f"Gerando capítulo {chapter_index}...")
+        chap_prompt = f"{prompt}\nCapítulo {chapter_index}\nResumo capítulos anteriores: {prev_summaries}"
+        raw = call_provider(provider, creds, chap_prompt)
+        content, summary = extract_content_and_summary(raw)
+        chapters.append(content)
+        prev_summaries.append(summary)
+        total_words += len(content.split())
+        current_pages = total_words // WORDS_PER_PAGE
+        print(f"Capítulo {chapter_index} gerado (~{len(content.split())} palavras). Páginas totais estimadas: {current_pages}")
+        chapter_index+=1
+        if chapter_index>MAX_CHAPTERS_CAP: break
+    pdf_name=f"{title.replace(' ','_')}.pdf"
+    salvar_pdf(chapters, pdf_name, title, author)
+    print(f"\n✅ PDF final salvo como {pdf_name} ({current_pages} páginas estimadas)")
 
-    salvar_pdf(texto, caminho="livro.pdf", titulo="História Gerada", autor="IA")
-    print("✅ Livro salvo como 'livro.pdf'")
+# ---------- Exemplo de uso ----------
+if __name__=="__main__":
+    # --- Configurações do usuário ---
+    provider="deepseek"   # ou "openai", "groq", "gemini", "anthropic", "hf", "local_llama", "mock"
+    creds={"api_key":"SUA_API_KEY"} # ou {"endpoint":"URL"} para local_llama
+    prompt="Escreva um romance de ficção científica com muito mistério e aventura, estilo best-seller."
+
+    generate_book(provider, creds, prompt, title="Romance Sci-Fi", author="IA", pages_target=150)
